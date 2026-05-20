@@ -10,7 +10,7 @@ not need to be re-run — all pre-collected data is provided.
 Master_Thesis/
 ├── data/                          # All input and output CSV files
 ├── raw_data/                      # All raw data: collected API data, and survivor public interview PDFs
-├── figures                        # All Python generated figures
+├── figures/                       # All Python generated figures
 ├── R_data/                        # RDS model objects and R-generated CSVs
 ├── R_Figures/                     # All R generated figures
 ├── R_Tables/                      # All R generated tables
