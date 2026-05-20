@@ -9,10 +9,11 @@ not need to be re-run — all pre-collected data is provided.
 ```text
 Master_Thesis/
 ├── data/                          # All input and output CSV files
+├── raw_data/                      # All raw data: collected API data, and survivor public interview PDFs
+├── figures                        # All Python generated figures
 ├── R_data/                        # RDS model objects and R-generated CSVs
-├── figures/                       # All generated figures
-├── R_Tables/                      # All generated tables
-├── Interviews/                    # Survivor interview PDFs (raw data)
+├── R_Figures/                     # All R generated figures
+├── R_Tables/                      # All R generated tables
 ├── 1_data_collection.ipynb        # API data collection (API)
 ├── 2_member_collection.ipynb      # Member data collection (API)
 ├── 3_merge_speeches.ipynb         # Merges annual speech CSVs
@@ -24,12 +25,6 @@ Master_Thesis/
 ```
 
 ## How to Reproduce
-
-### Requirements
-- Python 3.11 (conda environment: tf_env recommended)
-- R 4.x with packages: stm, lme4, lmerTest, ggplot2, gt, writexl, ecp, zoo
-- Key Python packages: pandas, numpy, sentence-transformers, simpletransformers,
-  statsmodels, ruptures, pdfplumber, sklearn
 
 ### Steps
 
@@ -93,7 +88,7 @@ Input:  `data/df_mbh_quarterly.csv`
         `data/all_switchers_combined.csv`
 
 ## Notes
-- All paths are relative — run scripts from the `Thesis-Final/` directory
+- All paths are relative — run scripts from the `Master_Thesis/` directory
 - Figures are saved to `figures/` or `R_figures/`, tables to `R_Tables/`
 - Pre-fitted STM models are in `R_data/` as .rds files
 - Steps 1, 2, and 5 are data collection files through an API
