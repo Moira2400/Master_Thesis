@@ -7,7 +7,7 @@ not need to be re-run — all pre-collected data is provided.
 
 ## Folder Structure
 ```text
-Thesis-Final/
+Master_Thesis/
 ├── data/                          # All input and output CSV files
 ├── R_data/                        # RDS model objects and R-generated CSVs
 ├── figures/                       # All generated figures
