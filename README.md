@@ -91,4 +91,4 @@ Input:  `data/df_mbh_quarterly.csv`
 - All paths are relative — run scripts from the `Master_Thesis/` directory
 - Figures are saved to `figures/` or `R_figures/`, tables to `R_Tables/`
 - Pre-fitted STM models are in `R_data/` as .rds files
-- Steps 1, 2, and 5 are data collection files through an API
+- Steps 1, 2, and 5 are data collection files through an API and should be skipped when replicating the analysis
