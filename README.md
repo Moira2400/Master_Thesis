@@ -7,6 +7,21 @@ not need to be re-run — all pre-collected data is provided.
 
 ## Folder Structure
 Thesis-Final/
+├── data/
+├── R_data/
+├── figures/
+├── R_Tables/
+├── Interviews/
+├── 1_data_collection.ipynb
+├── 2_member_collection.ipynb
+├── 3_merge_speeches.ipynb
+├── 4_data_cleaning.ipynb
+├── 5_baseline_collection.ipynb
+├── Phase1_final.ipynb
+├── Phase2_3_final.ipynb
+└── STM_others_final.Rmd
+
+Thesis-Final/
 ├── data/                          # All input and output CSV files
 ├── R_data/                        # RDS model objects and R-generated CSVs
 ├── figures/                       # All generated figures
