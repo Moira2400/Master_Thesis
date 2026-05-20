@@ -1,0 +1,1660 @@
+---
+title: "STM_Phase1_Final"
+author: "Moira"
+date: "2026-02-04"
+output: html_document
+---
+
+In this notebook, I run the Structural Topic Modelling (STM) Analysis along with the Krippendorf check, and execute the Multivariate Change-Point Analysis and the multivariate Mixed Effects Model. 
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+# clear
+rm(list = ls())
+```
+
+# Load Data & Clean
+
+```{r}
+library(here)
+library(stm)
+library(tm)
+library(readr)
+library(dplyr)
+library(gt)
+library(ggplot2)
+library(writexl)
+library(tidyr)
+library(stringr)
+library(igraph)
+library(lubridate)
+library(irr)
+library(zoo)
+library(ecp)
+library(lme4)
+library(lmerTest)  # gives p-values for lmer
+library(broom.mixed)
+
+dir.create("R_Figures")
+dir.create("R_Tables")
+
+df_base <- read_csv("data/parliamentary_baseline_cleaned.csv")
+df_MandB <- read_csv("data/df_merged_clean.csv")
+
+REFIT_MODELS <- FALSE
+REFIT_BASELINE <- FALSE
+```
+baseline_df = pd.read_csv("/Users/moira/Documents/CEU/Thesis/1_Data_Collection/parliamentary_baseline_cleaned.csv")
+df_merged_clean = pd.read_csv('/Users/moira/Documents/CEU/Thesis/2_Data_Cleaning/df_merged_clean.csv')
+
+
+```{r}
+df_MandB$party[is.na(df_MandB$party)] <- "Guest Speaker"
+df_MandB$in_government[df_MandB$party == "Guest Speaker"] <- 0
+```
+
+
+```{r}
+# Irish language stopwords for Dáil corpus
+irish_stopwords <- c(
+  "agus", "seo", "atá", "bhí", "bhfuil", "bheith",
+  "chur", "daoin", "ansin", "agam", "siad", "acu",
+  "níl", "níos", "déanta", "rá", "teachtaí",
+  "nach", "más", "faoi", "mbeadh", "anoi",
+  "tánaiste", "oireachtas"
+) #claude helped me come up with these
+
+# helper function to clean for stm
+prepare_for_stm <- function(df) {
+  df$date <- as.Date(df$date)
+  df$date_numeric <- as.numeric(df$date)
+  df$party <- as.factor(df$party)
+  df$in_government <- as.factor(df$in_government)
+  df <- df[!is.na(df$party) & !is.na(df$in_government), ]
+  
+  processed <- textProcessor( #already includes english stopwords in the apckage
+    df$clean_text, 
+    metadata = df,
+    customstopwords = irish_stopwords # removes Irish language tokens
+  ) # comes from STM package
+  
+  out <- prepDocuments(
+    processed$documents, 
+    processed$vocab, 
+    processed$meta, 
+    lower.thresh = 5 # removes words in fewer than 5 documents, converts words into matrix format, returns a list for stm()
+  ) 
+  
+  return(out)
+}
+
+out_mbh  <- prepare_for_stm(df_MandB) # lists with stm elements
+out_base <- prepare_for_stm(df_base)
+```
+^ stopword removal and frequency filtering of 5 can result in 24 documents being removed due to "No Words"
+
+
+
+
+# Phase 1
+##---------- MBH ---------- 
+
+## MBH STM
+
+```{r}
+if (REFIT_MODELS) {
+  set.seed(42)
+  custom_k <- c(5, 7, 9, 11, 13, 15, 17, 20, 22, 25, 30, 40, 50)
+  diag_search <- searchK(out_mbh$documents, out_mbh$vocab, 
+                         K = custom_k,
+                         prevalence =~ party + in_government + s(date_numeric),
+                         data = out_mbh$meta, 
+                         cores = 1)
+  saveRDS(diag_search, "R_data/mbh_diagnostic_results.rds")
+} else {
+  diag_search <- readRDS("R_data/mbh_diagnostic_results.rds")
+}
+print(diag_search$results)
+
+```
+
+
+
+```{r}
+# plot of results
+plot(diag_search)
+
+```
+
+
+```{r}
+png("R_Figures/diag_search_plot_mbh.png", width = 800, height = 600)
+
+# create the plot
+plot(diag_search)
+
+# close device
+dev.off()
+
+```
+
+
+
+The final model with the best k = 22
+
+```{r}
+if (REFIT_MODELS) {
+  set.seed(42)
+  mbh_select <- selectModel(out_mbh$documents, out_mbh$vocab,
+                            K = 22,
+                            prevalence =~ party + in_government + s(date_numeric),
+                            data = out_mbh$meta,
+                            runs = 20,
+                            max.em.its = 150, #default 75 insufficient; model converged at ~94 iterations
+                            init.type = "Spectral")
+  saveRDS(mbh_select, "R_data/mbh_select_22.rds")
+} else {
+  mbh_select <- readRDS("R_data/mbh_select_22.rds")
+}
+
+# Save to Figures folder
+png("R_Figures/plotModels_mbh_22.png", width = 800, height = 600)
+plotModels(mbh_select, pch = 1:20, legend.position = "bottomright")
+dev.off()
+
+# Display in RStudio plots pane
+plotModels(mbh_select, pch = 1:20, legend.position = "bottomright")
+
+# !! STOP HERE: look at plot, note best run number (top-right, tightest spread)
+```
+```{r}
+# Get exclusivity and coherence scores for each surviving run
+lapply(mbh_select$runout, function(m) {
+  list(
+    exclusivity = mean(exclusivity(m)),
+    coherence = mean(semanticCoherence(m, out_mbh$documents))
+  )
+})
+
+```
+
+All runs are identical and converged to the same solution every time. Robust! Slightly redundant with spectral initialization but a good robustness check.
+
+```{r}
+# After inspecting plotModels, setting the best run number here
+mbh_stm <- mbh_select$runout[[1]]  # <-- doesn't matter as all were the same
+
+saveRDS(mbh_stm, "R_data/mbh_stm_22.rds")
+saveRDS(out_mbh, "R_data/out_mbh_22.rds")
+
+```
+
+```{r}
+labelTopics(mbh_stm)
+
+```
+
+
+```{r}
+topic_labels <- c(
+  "T1"  = "T1: Mother and Baby Homes & County Homes",
+  "T2"  = "T2: Survivor Redress & Exclusions",
+  "T3"  = "T3: Party Politics",
+  "T4"  = "T4: Tuam Site & Excavation",
+  "T5"  = "T5: Childcare Funding",
+  "T6"  = "T6: Human Rights & Legislation",
+  "T7"  = "T7: Commission Reports & Delays",
+  "T8"  = "T8: Redress Administration",
+  "T9"  = "T9: Adoption & Identity",
+  "T10" = "T10: Archives & Records",
+  "T11" = "T11: Infant Mortality & Vaccine Trials",
+  "T12" = "T12: Family Law & Social Norms",
+  "T13" = "T13: Parliamentary Procedure",
+  "T14" = "T14: Order of Business & Seanad",
+  "T15" = "T15: Abortion & Eighth Amendment",
+  "T16" = "T16: Informal & Direct Debate",
+  "T17" = "T17: Commission Scope & Establishment",
+  "T18" = "T18: Grace Case & Child Protection",
+  "T19" = "T19: Survivor Truth & Shame",
+  "T20" = "T20: Formal & Supportive Debate",
+  "T21" = "T21: Irish Language",
+  "T22" = "T22: Church Role"
+)
+
+```
+
+```{r}
+# Find example speeches
+findThoughts(mbh_stm, 
+             texts = out_mbh$meta$clean_text,
+             topics = c(1:22),
+             n = 3)  # 3 example speeches per topic
+
+```
+
+
+
+## Descriptive Tables
+
+Make some descriptive tables that show how topics were talked about over time.... and which parties.... etc, topic prevalence changes over time... 
+
+
+PARTY DOMINANCE TABLE
+```{r}
+# create the Party Summary Table
+party_dominance <- out_mbh$meta %>%
+  group_by(party) %>%
+  summarise(
+    Speech_Count = n(),
+    .groups = 'drop'
+  ) %>%
+  mutate(
+    Percentage = round((Speech_Count / sum(Speech_Count)) * 100, 2)
+  ) %>%
+  arrange(desc(Speech_Count))
+
+# view the table
+print(party_dominance)
+
+# Save xlsx
+write_xlsx(party_dominance, "R_Tables/party_dominance_table.xlsx")
+
+# save R version
+saveRDS(party_dominance, "R_Tables/party_dominance_table.rds")
+
+
+```
+
+PARTY DOMINANCE PLOT
+```{r}
+# plotting the dominance of party
+ggplot(party_dominance, aes(x = reorder(party, Speech_Count), y = Speech_Count, fill = Speech_Count)) +
+  geom_bar(stat = "identity", fill = "steelblue", width = 0.7) +
+  coord_flip() +
+  theme_minimal(base_size = 12) +
+  labs(title = "Corpus Dominance by Party (MBH Dataset)",
+       subtitle = "Total speech count per political grouping",
+       x = "Political Party", 
+       y = "Total Number of Speeches") +
+  theme(legend.position = "none")
+
+ggsave("R_Figures/party_dominance_plot.png", width = 8, height = 6, dpi = 300)
+
+
+```
+
+COALITION MEMBERS WHEN TIMELINE
+```{r}
+# identify distinct government status for each party
+timeline_chapters <- df_MandB %>%
+  mutate(date = as.Date(date)) %>%
+  arrange(party, date) %>%
+  group_by(party) %>%
+  # data.table::rleid creates a unique ID every time 'in_government' changes
+  mutate(streak_id = data.table::rleid(in_government)) %>% 
+  group_by(party, streak_id, in_government) %>%
+  summarise(
+    Start_Date = min(date),
+    End_Date = max(date),
+    Speech_Count = n(),
+    .groups = 'drop'
+  ) %>%
+  mutate(
+    Status = ifelse(in_government == 1, "Government", "Opposition")
+  ) %>%
+  arrange(Start_Date)
+
+# create the table
+pretty_chapters_table <- timeline_chapters %>%
+  select(party, Status, Start_Date, End_Date, Speech_Count) %>%
+  gt(groupname_col = "Status") %>% 
+  tab_header(
+    title = md("**Institutional Chapters of the MBH Corpus**"),
+    subtitle = "Timeline showing distinct role transitions per party"
+  ) %>%
+  # FIX: Using "yMMM" for Month Year (e.g., Nov 2010)
+  fmt_date(columns = c(Start_Date, End_Date), date_style = "yMMM") %>%
+  cols_label(
+    party = "Political Party",
+    Start_Date = "Joined",
+    End_Date = "Exited",
+    Speech_Count = "Speeches"
+  ) %>%
+  tab_options(
+    row_group.background.color = "#f9f9f9",
+    row_group.font.weight = "bold"
+  )
+
+# View the table
+pretty_chapters_table
+
+# Save as PNG
+pretty_chapters_table %>%
+  gtsave(filename = "R_Tables/Institutional_Chapters_Table.png")
+
+# Save as PDF
+pretty_chapters_table %>%
+  gtsave(filename = "R_Tables/Institutional_Chapters_Table.pdf")
+
+print("Table saved to the Tables folder!")
+```
+
+
+
+
+BALANCE CHECK
+```{r}
+# Create the 3 groups
+status_breakdown <- df_MandB %>%
+  mutate(
+    # Force column to character to check for the label
+    party_char = as.character(party),
+    # If party is Guest Speaker, label them as such. Otherwise, split by government status.
+    Final_Category = case_when(
+      party_char == "Guest Speaker" ~ "Guest Speaker",
+      in_government == 1 ~ "Government",
+      in_government == 0 ~ "Opposition",
+      TRUE ~ "Other"
+    )
+  ) %>%
+  group_by(Final_Category) %>%
+  summarise(Speech_Count = n(), .groups = 'drop') %>%
+  mutate(
+    Percentage = (Speech_Count / sum(Speech_Count)) * 100
+  ) %>%
+  arrange(desc(Speech_Count))
+
+# Create the GT table
+corpus_composition_table <- status_breakdown %>%
+  gt() %>%
+  tab_header(
+    title = md("**Corpus Composition by Executive Status**"),
+    subtitle = "Includes Guest Speakers as a distinct non-parliamentary category"
+  ) %>%
+  fmt_number(
+    columns = Percentage,
+    decimals = 1,
+    pattern = "{x}%"
+  ) %>%
+  cols_label(
+    Final_Category = "Speaker Role",
+    Speech_Count = "Total Speeches",
+    Percentage = "Proportion"
+  ) %>%
+  tab_options(
+    table.width = px(450),
+    column_labels.font.weight = "bold"
+  )
+
+# Save
+corpus_composition_table %>%
+  gtsave(filename = "R_Tables/Detailed_Corpus_Composition.png")
+
+# View result
+print(status_breakdown)
+corpus_composition_table
+
+```
+
+TOPIC PREVALENCE PLOT
+```{r}
+# extract and average the theta values
+agg_prevalence <- data.frame(colMeans(mbh_stm$theta))
+colnames(agg_prevalence) <- "Mean_Prevalence"
+agg_prevalence$Topic_ID <- paste0("T", 1:22)
+agg_prevalence$Full_Label <- topic_labels[agg_prevalence$Topic_ID]
+
+# create a plot
+ggplot(agg_prevalence, aes(x = reorder(Full_Label, Mean_Prevalence), 
+                           y = Mean_Prevalence)) +
+  geom_bar(stat = "identity", fill = "steelblue", width = 0.7) +
+  coord_flip() +
+  theme_minimal(base_size = 12) +
+  labs(title = "Aggregate Topic Prevalence (MBH Dataset)",
+       x = "Topic", 
+       y = "Average Proportion in Corpus")
+
+ggsave("R_Figures/agg_topic_prevalence.png", width = 8, height = 6, dpi = 300)
+
+
+```
+
+
+TOPIC PREVALENCE PROFILES BY POLITICAL PARTY
+Excluded: Socialist Party & WUA
+```{r}
+# specify parties to exclude
+exclude_list <- c("socialist party", "workers and unemployed action")
+
+# prepare party-level data
+party_prevalence <- data.frame(mbh_stm$theta)
+colnames(party_prevalence) <- paste0("T", 1:22)
+party_prevalence$party <- out_mbh$meta$party
+
+# clean and filter data
+party_long <- party_prevalence %>%
+  mutate(party_clean = tolower(trimws(as.character(party)))) %>%
+  filter(!party_clean %in% exclude_list, party_clean != "") %>%
+  mutate(party = droplevels(as.factor(party_clean))) %>%
+  group_by(party) %>%
+  summarise(across(starts_with("T"), mean)) %>%
+  pivot_longer(cols = starts_with("T"), names_to = "Topic_ID", values_to = "Prevalence") %>%
+  mutate(
+    Full_Label = topic_labels[Topic_ID],
+    Full_Label_Wrapped = str_wrap(Full_Label, width = 25),
+    Topic_Num = as.numeric(str_extract(Topic_ID, "[0-9]+"))
+  )
+
+# create facet wrap by party
+p <- ggplot(party_long, aes(x = reorder(Full_Label_Wrapped, Topic_Num), 
+                             y = Prevalence, fill = Prevalence)) +
+  geom_bar(stat = "identity") +
+  facet_wrap(~party, scales = "free_x", ncol = 3) +  # fixed x, scroll topics on y
+  coord_flip() +
+  scale_fill_gradient(low = "lightblue", high = "darkblue") +
+  theme_minimal(base_size = 9) +
+  labs(title = "Topic Prevalence Profiles by Political Party",
+       subtitle = "Excluded: Socialist Party & WUA",
+       x = NULL, y = "Average Prevalence") +
+  theme(
+    legend.position = "none",
+    axis.text.y = element_text(size = 6),
+    axis.text.x = element_text(size = 6),
+    strip.text = element_text(face = "bold", size = 8),
+    panel.spacing = unit(0.8, "lines")
+  )
+
+ggsave("R_Figures/party_discursive_profile.png", plot = p, width = 16, height = 20, dpi = 300)
+ggsave("R_Figures/party_discursive_profile.pdf", plot = p, width = 16, height = 20)
+
+```
+
+Topic proportions by PArty Table
+```{r}
+# extract Topic Proportions and merge with Party
+topic_party_dist <- data.frame(mbh_stm$theta)
+colnames(topic_party_dist) <- paste0("Topic", 1:22)
+topic_party_dist$party <- out_mbh$meta$party
+
+# calculate mean prevalence per party
+party_table <- topic_party_dist %>%
+  group_by(party) %>%
+  summarise(across(starts_with("Topic"), mean))
+
+# transpose for easier reading
+party_table_t <- as.data.frame(t(party_table[,-1]))
+colnames(party_table_t) <- party_table$party
+party_table_t$Topic <- rownames(party_table_t)
+
+print(party_table_t)
+
+```
+
+
+## MBH Estimate Effect - Topic Ownership Plot
+
+TOPIC OWNERSHIP (GOV vs OPP)
+```{r}
+# estimate the effect of Government status on all 15 topics
+prep_gov <- estimateEffect(1:22 ~ in_government, mbh_stm, meta = out_mbh$meta)
+
+
+
+# plot the difference
+#pdf("R_Figures/topic_ownership_difference.pdf", width = 12, height = 8)
+png("R_Figures/topic_ownership_gov_vs_opp.png",
+    width = 3000, height = 2000, res = 300)
+
+
+par(mar = c(5, 12, 4, 4),
+    cex = 0.6)         # all other text including topic labels
+
+plot(prep_gov, "in_government", method = "difference",
+     cov.value1 = "1", cov.value2 = "0",
+     main = "Topic Prevalence: Opposition vs. Government",
+     xlab = "Opposition <---> Government",
+     labeltype = "custom",
+     custom.labels = topic_labels
+)
+
+
+```
+
+```{r}
+summary(prep_gov)
+```
+
+```{r}
+names(mbh_stm)
+```
+
+
+CHECK IF CONVERGED
+```{r}
+mbh_stm$convergence
+```
+
+
+MBH TOPIC OWNERSHIP SHARE DECOMPOSIITION (%)
+```{r}
+## Regime Share Decomposition: Topic Ownership by % (Gov vs Opp)
+regime_share_data <- data.frame(
+  mbh_stm$theta,
+  party        = out_mbh$meta$party,
+  in_government = as.numeric(as.character(out_mbh$meta$in_government)),
+  date         = as.Date(out_mbh$meta$date)
+) 
+colnames(regime_share_data)[1:22] <- paste0("T", 1:22)
+
+# Add time period labels
+regime_share_data <- regime_share_data %>%
+  mutate(
+    period = case_when(
+      date < as.Date("2021-01-12") ~ "Pre-Report (before Jan 2021)",
+      TRUE                         ~ "Post-Report (Jan 2021+)"
+    ),
+    role = ifelse(in_government == 1, "Government", "Opposition")
+  )
+
+# Function: compute % of each topic's total usage coming from Gov vs Opp
+compute_share <- function(df, label) {
+  df %>%
+    pivot_longer(cols = T1:T22, names_to = "Topic_ID", values_to = "Proportion") %>%
+    group_by(Topic_ID, role) %>%
+    summarise(Total = sum(Proportion), .groups = "drop") %>%
+    group_by(Topic_ID) %>%
+    mutate(
+      Grand_Total = sum(Total),
+      Share_Pct   = (Total / Grand_Total) * 100,
+      Period      = label
+    ) %>%
+    ungroup()
+}
+
+# Run for all 3 windows
+share_all    <- compute_share(regime_share_data,                                    "All Time")
+share_pre21  <- compute_share(filter(regime_share_data, period == "Pre-Report (before Jan 2021)"),  "Pre-2021")
+share_post21 <- compute_share(filter(regime_share_data, period == "Post-Report (Jan 2021+)"), "Post-2021")
+
+share_combined <- bind_rows(share_all, share_pre21, share_post21) %>%
+  mutate(
+    Full_Label = topic_labels[Topic_ID],
+    # Flag regime membership for ordering
+    Regime = case_when(
+      Topic_ID %in% c("T4","T5","T8","T13","T14","T17", "T20") ~ "Managerial",
+      Topic_ID %in% c("T2","T3","T6","T11","T12","T16","T18", "T19","T21", "T22") ~ "Exploratory",
+      TRUE ~ "Other"
+    )
+  )
+
+# Stacked bar: Gov share vs Opp share per topic (faceted by period)
+ggplot(share_combined, aes(x = reorder(Full_Label, Share_Pct * (role == "Government")),
+                           y = Share_Pct, fill = role)) +
+  geom_bar(stat = "identity", position = "stack") +
+  geom_hline(yintercept = 50, linetype = "dashed", color = "black", linewidth = 0.5) +
+  coord_flip() +
+  facet_wrap(~factor(Period, levels = c("All Time","Pre-2021","Post-2021"))) +
+  scale_fill_manual(values = c("Government" = "#2166AC", "Opposition" = "#D6604D")) +
+  theme_minimal() +
+  labs(
+    title    = "Topic Prevalence: Government vs. Opposition Share (%)",
+    x = NULL, y = "Share of Total Topic Usage (%)",
+    fill = "Role",
+    caption = "Managerial: T4,T5,T8,T13,T14,T17,T20 | Exploratory: T2,T3,T6,T11,T12,T16,T18,T19,T21,T22"
+  ) +
+  theme(
+    axis.text.y  = element_text(size = 7),
+    strip.text   = element_text(face = "bold"),
+    legend.position = "bottom"
+  )
+
+ggsave("R_Figures/topic_ownership_share_pct.png", width = 14, height = 8, dpi = 300)
+ggsave("R_Figures/topic_ownership_share_pct.pdf", width = 14, height = 8)
+
+```
+```{r}
+## Clean numeric summary table of the shifts
+
+share_wide <- share_combined %>%
+  filter(role == "Government") %>%
+  select(Topic_ID, Full_Label, Regime, Period, Share_Pct) %>%
+  pivot_wider(names_from = Period, values_from = Share_Pct) %>%
+  mutate(
+    Shift = `Post-2021` - `Pre-2021`,
+    across(where(is.numeric), ~round(.x, 1))
+  ) %>%
+  arrange(desc(`All Time`))
+
+print(share_wide)
+write_xlsx(share_wide, "R_Tables/topic_ownership_share_table.xlsx")
+```
+
+
+
+REGIME SCHEMA PLOT
+```{r}
+regime_schema <- data.frame(
+  Regime = c(
+    rep("Managerial", 7),
+    rep("Exploratory", 10)
+  ),
+  Topic = c(
+    # Managerial - government owned from ownership plot
+    "T4: Tuam Site & Excavation",
+    "T5: Childcare Funding",
+    "T8: Redress Administration",
+    "T13: Parliamentary Procedure",
+    "T14: Order of Business & Seanad",
+    "T17: Commission Scope & Establishment",
+    "T20: Formal & Supportive Debate",
+    # Exploratory - opposition owned from ownership plot
+    "T2: Survivor Redress & Exclusions",
+    "T3: Party Politics",
+    "T6: Human Rights & Legislation",
+    "T11: Infant Mortality & Vaccine Trials",
+    "T12: Family Law & Social Norms",
+    "T16: Informal & Direct Debate",
+    "T18: Grace Case & Child Protection",
+    "T19: Church, State & Survivor Truth",
+    "T21: Irish Language",
+    "T22: Church & Hospital Ownership"
+  ),
+  FREX_Words = c(
+    # Managerial FREX from new labelTopics output
+    "excav, site, coron, burial, director, dna, forens",
+    "childcar, alloc, fund, million, increas, earli, programm",
+    "payment, card, applic, resid, waiver, elig, quirk",
+    "shall, minut, busi, stage, exceed, seanad, statement",
+    "transport, byrn, notic, senat, mcgrath, burk, pat",
+    "establish, refer, scope, term, inquiri, examin, judg",
+    "welcom, thank, import, stori, everyon, colleagu, listen",
+    # Exploratory FREX from new labelTopics output
+    "redress, exclud, survivor, trauma, six, arbitrari, exclus",
+    "fine, gael, fianna, fáil, polit, taoiseach, parti",
+    "human, right, court, principl, bill, law, jurisdict",
+    "bethani, trial, mortal, vaccin, infant, die, unmark",
+    "daughter, love, father, marri, lone, marriag, famili",
+    "get, point, say, situat, thing, know, tri",
+    "grace, asylum, homeless, mental, complaint, sexual, defenc",
+    "victim, shame, truth, justic, horror, incarcer, apolog",
+    "lei, sin, mar, narrat, ach, utter, read",
+    "hospit, matern, chariti, etho, church, religi, ownership"
+  )
+)
+
+regime_table <- regime_schema %>%
+  gt(groupname_col = "Regime") %>%
+  tab_header(
+    title = "Table 2: The Regime Schema",
+    subtitle = "Categorization of STM Topics by Linguistic and Rhetorical Function"
+  ) %>%
+  cols_label(
+    Topic = "Topic ID & Label",
+    FREX_Words = "Top FREX Words"
+  ) %>%
+  cols_width(
+    Topic ~ px(220),
+    FREX_Words ~ px(320)
+  ) %>%
+  tab_options(
+    table.font.size = 12,
+    heading.title.font.size = 16,
+    column_labels.font.weight = "bold",
+    row_group.font.weight = "bold",
+    row_group.background.color = "#f9f9f9"
+  )
+
+regime_table
+
+# Save
+regime_table %>%
+  gtsave(filename = "R_Tables/Table2_Regime_Schema.png", expand = 10)
+regime_table %>%
+  gtsave(filename = "R_Tables/Table2_Regime_Schema.pdf")
+
+```
+
+
+## Co-occurence of Topics
+CHECK WHICH TOPIC CO-OCCUR
+PLOT
+```{r}
+topic_cor <- topicCorr(mbh_stm)
+topic_cor$cor
+plot(topic_cor)
+plot(topic_cor, type = "network", cutoff = 0.1)
+```
+```{r}
+png("R_Figures/topic_correlation_network.png", width = 3000, height = 3000, res = 300)
+
+plot(topic_cor, type = "network", cutoff = 0.1)
+
+dev.off()
+
+```
+
+## --------- Baseline --------- 
+
+## Baseline STM
+
+```{r}
+if (REFIT_BASELINE) {
+  set.seed(42)
+  custom_k <- c(5, 10, 15, 20, 25, 30)
+  diag_search_base <- searchK(out_base$documents, out_base$vocab, K = custom_k,
+                         prevalence =~ party + in_government + s(date_numeric),
+                         data = out_base$meta,
+                         verbose = TRUE,
+                         cores = 1)
+  saveRDS(diag_search_base, "R_data/base_diagnostic_results.rds")
+} else {
+  diag_search_base <- readRDS("R_data/base_diagnostic_results.rds")
+}
+print(diag_search_base$results)
+plot(diag_search_base)
+
+
+
+```
+
+
+
+```{r}
+if (REFIT_BASELINE) {
+  set.seed(42)
+  base_select <- selectModel(out_base$documents, out_base$vocab,
+                             K = 20,
+                             prevalence =~ party + in_government + s(date_numeric),
+                             data = out_base$meta,
+                             runs = 20,
+                             max.em.its = 150, #default 75 insufficient; model converged at ~94 iterations
+                             init.type = "Spectral")
+  saveRDS(base_select, "R_data/base_select.rds")
+} else {
+  base_select <- readRDS("R_data/base_select.rds")
+}
+
+# Save to Figures folder
+png("R_Figures/plotModels_base.png", width = 800, height = 600)
+plotModels(base_select, pch = 1:20, legend.position = "bottomright")
+dev.off()
+
+# Display
+plotModels(base_select, pch = 1:20, legend.position = "bottomright")
+
+# !! STOP HERE: look at plot, note best run number (top-right, tightest spread)
+
+```
+
+
+```{r}
+# Get exclusivity and coherence scores for each surviving run
+lapply(base_select$runout, function(m) {
+  list(
+    exclusivity = mean(exclusivity(m)),
+    coherence = mean(semanticCoherence(m, out_base$documents))  )
+})
+
+```
+
+```{r}
+# After inspecting plotModels, setting the best run number here
+  base_stm <- base_select$runout[[1]]  # <-- same results
+  
+  saveRDS(base_stm, "R_data/base_stm.rds")
+  saveRDS(out_base, "R_data/out_base.rds")
+
+```
+
+
+```{r}
+labelTopics(base_stm)
+```
+
+Baseline Labels
+```{r}
+base_labels <- c(
+  "T1"  = "T1: Legislative Amendments",
+  "T2"  = "T2: Gender & Human Rights",
+  "T3"  = "T3: Bill Debates",
+  "T4"  = "T4: Infrastructure & Defence",
+  "T5"  = "T5: Local Government & Irish Language",
+  "T6"  = "T6: Health & Hospital Services",
+  "T7"  = "T7: Banking & Pensions",
+  "T8"  = "T8: Family & Child Welfare",
+  "T9"  = "T9: Parliamentary Questions",
+  "T10" = "T10: Local Issues & Roads",
+  "T11" = "T11: Mortgage & Farming Debt",
+  "T12" = "T12: Banking & Finance",
+  "T13" = "T13: Housing & Rent",
+  "T14" = "T14: Public Administration & Garda",
+  "T15" = "T15: General Political Debate",
+  "T16" = "T16: Foreign Affairs & Brexit",
+  "T17" = "T17: Arts & Prison Services",
+  "T18" = "T18: Social Welfare & Payments",
+  "T19" = "T19: Seanad Procedure",
+  "T20" = "T20: Education & Schools"
+)
+
+```
+
+
+## Descriptive Tables
+
+Topic Prevalence Profiles by Political Party Baseline
+```{r}
+
+# process Baseline Data
+base_prevalence <- data.frame(base_stm$theta)
+colnames(base_prevalence) <- paste0("T", 1:20)
+base_prevalence$party <- out_base$meta$party
+
+base_long <- base_prevalence %>%
+  filter(!party %in% exclude_list) %>%
+  mutate(party = droplevels(as.factor(party))) %>%
+  group_by(party) %>%
+  summarise(across(starts_with("T"), mean)) %>%
+  pivot_longer(-party, names_to = "Topic_ID", values_to = "Prevalence")
+
+# plot Baseline Profiles
+ggplot(base_long, aes(x = reorder(Topic_ID, Prevalence), y = Prevalence, fill = Topic_ID)) +
+  geom_bar(stat = "identity") +
+  facet_wrap(~party, scales = "free_y") + 
+  coord_flip() +
+  scale_x_discrete(labels = base_labels) + 
+  theme_minimal() +
+  labs(title = "Topic Prevalence Profiles by Political Party Baseline", subtitle = "Standard Political Business") +
+  theme(legend.position = "none", axis.text.y = element_text(size = 7))
+
+
+```
+
+## Baseline Estimate Effect - Topic Ownership Plot
+Topic Ownership
+```{r}
+# estimate the effect of all topics
+prep_base_gov <- estimateEffect(1:20 ~ in_government, base_stm, meta = out_base$meta)
+
+par(mar = c(5, 12, 4, 2)) 
+
+plot(prep_base_gov, "in_government", method = "difference",
+     cov.value1 = "1", cov.value2 = "0",
+     topics = 1:20,
+     main = "Baseline: Topic Ownership (Gov vs. Opp)",
+     xlab = "Opposition <--- (Difference) ---> Government",
+     labeltype = "custom",
+     custom.labels = base_labels)
+
+```
+
+## Co-occurence of Topics
+```{r}
+topic_cor <- topicCorr(base_stm)
+topic_cor$cor
+plot(topic_cor)
+plot(topic_cor, type = "network", cutoff = 0.1)
+```
+
+# Phase 2
+
+## Table of Mean Topic Prevalence by Year
+```{r}
+# create a Year variable in metadata
+out_mbh$meta$year <- format(as.Date(out_mbh$meta$date), "%Y")
+
+# extract Topic Proportions (theta) and merge with Year
+topic_year_dist <- data.frame(mbh_stm$theta)
+colnames(topic_year_dist) <- paste0("Topic", 1:22)
+topic_year_dist$year <- out_mbh$meta$year
+
+# calculate mean prevalence per year
+year_table <- topic_year_dist %>%
+  group_by(year) %>%
+  summarise(across(starts_with("Topic"), mean)) %>%
+  pivot_longer(cols = starts_with("Topic"), names_to = "Topic", values_to = "Prevalence") %>%
+  pivot_wider(names_from = year, values_from = Prevalence)
+
+# view
+print(year_table)
+
+
+```
+
+
+
+
+## MBH Topic Heatmap over Time
+
+```{r}
+# A quick visual check of Topic vs. Year
+library(ggplot2)
+
+year_long <- topic_year_dist %>%
+  pivot_longer(cols = starts_with("Topic"), names_to = "Topic", values_to = "Value") %>%
+  group_by(year, Topic) %>%
+  summarise(Mean_Prevalence = mean(Value), .groups = 'drop')
+
+ggplot(year_long, aes(x = year, y = Topic, fill = Mean_Prevalence)) +
+  geom_tile() +
+  scale_fill_gradient(low = "white", high = "red") +
+  theme_minimal() +
+  labs(title = "Topic Heatmap over Time", subtitle = "Are certain topics only emerging late in the sample?")
+
+```
+
+## Baseline Topic Heatmap over Time
+```{r}
+# Extract Baseline Time Data
+base_year_dist <- data.frame(base_stm$theta)
+colnames(base_year_dist) <- paste0("Topic", 1:20)
+base_year_dist$year <- format(as.Date(out_base$meta$date), "%Y")
+
+base_year_long <- base_year_dist %>%
+  pivot_longer(cols = starts_with("Topic"), names_to = "Topic", values_to = "Value") %>%
+  group_by(year, Topic) %>%
+  summarise(Mean_Prevalence = mean(Value), .groups = 'drop')
+
+ggplot(base_year_long, aes(x = year, y = Topic, fill = Mean_Prevalence)) +
+  geom_tile() +
+  scale_fill_gradient(low = "white", high = "blue") + # Blue for Baseline, Red for Scandal
+  scale_y_discrete(labels = base_labels) +
+  theme_minimal() +
+  labs(title = "Baseline Topic Heatmap", x = "Year", y = "Topic Theme")
+
+```
+
+## Aggregate Topic Evolution over Time
+```{r}
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(Polychrome)
+
+# 15 distinct colors
+set.seed(123) #ensures same colours everytime run
+dist_palette <- createPalette(22, c("#ff0000", "#00ff00", "#0000ff"))
+dist_palette <- as.vector(dist_palette)
+
+# prepare data
+year_plot_data <- data.frame(mbh_stm$theta)
+colnames(year_plot_data) <- paste0("T", 1:22)
+year_plot_data$year <- as.numeric(out_mbh$meta$year)
+
+year_summary <- year_plot_data %>%
+  group_by(year) %>%
+  summarise(across(starts_with("T"), mean)) %>%
+  pivot_longer(cols = starts_with("T"), names_to = "Topic", values_to = "Prevalence")
+
+# plotting
+ggplot(year_summary, aes(x = year, y = Prevalence, color = Topic, group = Topic)) +
+  geom_line(linewidth = 0.8, alpha = 0.8) + # Thick lines help differentiation
+  geom_point(size = 1) +
+  theme_minimal() +
+  # Apply the Polychrome palette
+  scale_color_manual(values = dist_palette, labels = topic_labels) + 
+  scale_x_continuous(limits = c(2010, 2026), breaks = seq(2010, 2026, 2)) +
+  labs(title = "Aggregate Topic Evolution (2010-2026)",
+       subtitle = "Colors generated via Polychrome for maximum visual distance",
+       x = "Year", 
+       y = "Average Topic Proportion") +
+  theme(legend.position = "right",
+        legend.text = element_text(size = 8),
+        panel.grid.minor = element_blank())
+```
+
+
+## Exploratory vs Managerial Over Time
+```{r}
+regime_data <- data.frame(mbh_stm$theta)
+colnames(regime_data) <- paste0("T", 1:22)
+
+regime_data <- regime_data %>%
+  mutate(
+    Exploratory = T2 + T3 + T6 + T11 + T12 + T16 + T18 + T19 + T21 + T22,
+    Managerial  = T4 + T5 + T8 + T13 + T14 + T17 + T20,
+    year = as.numeric(format(as.Date(out_mbh$meta$date), "%Y")),
+    date = as.Date(out_mbh$meta$date),
+    party = out_mbh$meta$party,
+    in_government = out_mbh$meta$in_government
+  )
+
+regime_summary <- regime_data %>%
+  group_by(party, year, in_government) %>%
+  summarise(
+    Exploratory = mean(Exploratory),
+    Managerial = mean(Managerial),
+    .groups = 'drop'
+  ) %>%
+  pivot_longer(cols = c(Exploratory, Managerial), 
+               names_to = "Regime", values_to = "Score")
+
+ggplot(regime_summary, aes(x = year, y = Score, color = Regime, linetype = Regime)) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 2) +
+  geom_vline(xintercept = 2021, linetype = "dashed", color = "darkgreen", linewidth = 1) +
+  facet_wrap(~party) +
+  theme_minimal() +
+  scale_x_continuous(breaks = seq(2010, 2025, 2)) +
+  scale_color_manual(values = c("Exploratory" = "#E41A1C", "Managerial" = "#377EB8")) +
+  labs(
+    title = "Exploratory and Managerial Regimes in Parliamentary Debate (2010–2025)",
+    subtitle = "Dashed line indicates publication of the Mother and Baby Homes Commission Report (2021)",
+    x = "Year",
+    y = "Average Regime Score",
+    caption = "Exploratory: T2,T3,T6,T11,T12,T16,T18,T19,T21,T22 | Managerial: T4,T5,T8,T13,T14,T17,T20"
+  ) +
+  theme(
+    legend.position = "bottom",
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+ggsave("R_Figures/regime_over_time.png", width = 12, height = 8, dpi = 300)
+ggsave("R_Figures/regime_over_time.pdf", width = 12, height = 8)
+```
+
+```{r}
+regime_gov_summary <- regime_data %>%
+  group_by(year, in_government) %>%
+  summarise(
+    Exploratory = mean(Exploratory),
+    Managerial = mean(Managerial),
+    .groups = "drop"
+  ) %>%
+  pivot_longer(cols = c(Exploratory, Managerial),
+               names_to = "Regime",
+               values_to = "Score") %>%
+  mutate(Role = ifelse(in_government == 1, "Government", "Opposition"))
+
+ggplot(regime_gov_summary,
+       aes(x = year, y = Score, color = Regime, linetype = Role)) +
+  geom_line(linewidth = 1.3) +
+  geom_point(size = 2) +
+  geom_vline(xintercept = 2021, linetype = "dashed", color = "darkgreen", linewidth = 1) +
+  theme_minimal() +
+  scale_color_manual(values = c("Exploratory" = "#E41A1C", "Managerial" = "#377EB8")) +
+  labs(
+    title = "Government and Opposition Language Regimes (2010–2025)",
+    x = "Year",
+    y = "Average Regime Score",
+    caption = "Exploratory: T2,T3,T6,T11,T12,T16,T18,T19,T21,T22 | Managerial: T4,T5,T8,T13,T14,T17,T20"
+  ) +
+  theme(legend.position = "bottom")
+
+ggsave("R_Figures/government_vs_opposition_regimes.png", width = 10, height = 6, dpi = 300)
+ggsave("R_Figures/government_vs_opposition_regimes.pdf", width = 10, height = 6)
+
+```
+
+
+
+## save csv for Python
+```{r}
+regime_gov_monthly <- regime_data %>%
+  mutate(month = as.Date(format(date, "%Y-%m-01"))) %>%
+  group_by(month, in_government) %>%
+  summarise(
+    Exploratory = mean(Exploratory),
+    Managerial  = mean(Managerial),
+    .groups     = "drop"
+  ) %>%
+  pivot_longer(cols = c(Exploratory, Managerial),
+               names_to  = "Regime",
+               values_to = "Score") %>%
+  mutate(Role = ifelse(in_government == 1, "Government", "Opposition"))
+
+write.csv(regime_gov_monthly, "R_data/regime_gov_monthly.csv", row.names = FALSE)
+print("Exported regime_gov_monthly.csv")
+
+
+```
+
+```{r}
+# Export topic-level monthly data
+topic_gov_monthly <- regime_data %>%
+  mutate(month = as.Date(format(date, "%Y-%m-01"))) %>%
+  group_by(month, in_government) %>%
+  summarise(across(starts_with("T"), mean), .groups = "drop") %>%
+  pivot_longer(cols = starts_with("T"), 
+               names_to = "Topic_ID", 
+               values_to = "Score") %>%
+  mutate(
+    Role = ifelse(in_government == 1, "Government", "Opposition"),
+    Topic_Label = topic_labels[Topic_ID],
+    Regime = case_when(
+      Topic_ID %in% c("T4","T5","T8","T13","T14","T17", "T20") ~ "Managerial",
+      Topic_ID %in% c("T2","T3","T6","T11","T12","T16","T18", "T19","T21", "T22") ~ "Exploratory",
+      TRUE ~ "Other"
+    )
+  )
+
+write.csv(topic_gov_monthly, "R_data/topic_gov_monthly.csv", row.names = FALSE)
+print("Exported topic_gov_monthly.csv")
+
+```
+
+Measures Expected Topic Proportion of Topic 17 (Magdalen) for parties that transitioned between Opposition and Government CHANGEEEE
+- Institutional Absorption/Muting effect - Habitual Lag(?)
+```{r}
+# combine model results with metadata - pull the actual topic percentages (theta) and match them with party and status
+df_results <- data.frame(
+  party = out_mbh$meta$party,
+  in_government = out_mbh$meta$in_government,
+  date = out_mbh$meta$date,
+  topic17_prop = mbh_stm$theta[, 17]  # T17: Magdalen Laundries & Survivor Testimony
+)
+
+chameleon_summary <- df_results %>%
+  group_by(party, in_government) %>%
+  summarise(
+    mean_prop = mean(topic17_prop),
+    start_date = min(date),
+    end_date = max(date),
+    count = n(),
+    .groups = 'drop'
+  ) %>%
+  pivot_wider(
+    names_from = in_government,
+    values_from = c(mean_prop, start_date, end_date, count)
+  )
+
+final_table <- chameleon_summary %>%
+  filter(!is.na(mean_prop_0) & !is.na(mean_prop_1)) %>%
+  mutate(
+    Shift = mean_prop_1 - mean_prop_0,
+    Opp_Period = paste0(format(start_date_0, "%Y"), "-", format(end_date_0, "%Y")),
+    Gov_Period = paste0(format(start_date_1, "%Y"), "-", format(end_date_1, "%Y"))
+  ) %>%
+  select(party, Opp_Period, mean_prop_0, Gov_Period, mean_prop_1, Shift)
+
+print(final_table)
+
+```
+# -----------
+# Intra-Rater Reliability
+Krippendrof alpha
+```{r}
+# Create a blind coding sheet - only FREX words, randomised order
+set.seed(42)
+random_order <- sample(1:22)
+
+coding_sheet <- data.frame(
+  Coding_ID = 1:22,
+  Topic_Number = random_order,
+  FREX_Words = c(
+    "babi, mother, home, westbank, counti, orphanag, children",        # T1
+    "redress, exclud, survivor, trauma, six, arbitrari, exclus",       # T2
+    "fine, gael, fianna, fáil, polit, taoiseach, parti",               # T3
+    "excav, site, coron, burial, director, dna, forens",               # T4
+    "childcar, alloc, fund, million, increas, earli, programm",        # T5
+    "human, right, court, principl, bill, law, jurisdict",             # T6
+    "interim, report, forum, commiss, extens, publish, februari",      # T7
+    "payment, card, applic, resid, waiver, elig, quirk",               # T8
+    "adopt, birth, adopte, certif, illeg, registr, regist",            # T9
+    "archiv, databas, data, seal, gdpr, record, copi",                 # T10
+    "bethani, trial, mortal, vaccin, infant, die, unmark",             # T11
+    "daughter, love, father, marri, lone, marriag, famili",            # T12
+    "shall, minut, busi, stage, exceed, seanad, statement",            # T13
+    "transport, byrn, notic, senat, mcgrath, burk, pat",               # T14
+    "abort, eighth, repeal, pregnanc, termin, referendum, violenc",    # T15
+    "get, point, say, situat, thing, know, tri",                       # T16
+    "establish, refer, scope, term, inquiri, examin, judg",            # T17
+    "grace, asylum, homeless, mental, complaint, sexual, defenc",      # T18
+    "victim, shame, truth, justic, horror, incarcer, apolog",          # T19
+    "welcom, thank, import, stori, everyon, colleagu, listen",         # T20
+    "lei, sin, mar, narrat, ach, utter, read",                         # T21
+    "hospit, matern, chariti, etho, church, religi, ownership"         # T22
+  )[random_order]
+)
+
+write.csv(coding_sheet, "R_Tables/blind_coding_sheet.csv", row.names = FALSE)
+print("Blind coding sheet exported — do not look at original labels!")
+```
+
+```{r}
+library(irr)
+
+# After completing round 2, enter both sets of labels as numeric categories
+# convert labels to numbers - Managerial=1, Exploratory=2, Other=3
+round1 <- c(3,2,2,1,1,2,1,1,3,1,2,2,1,1,3,2,1,2,2,1,2,2) # the original regime assignments
+round2 <- c(3,2,2,1,1,2,1,1,3,1,2,2,1,1,3,2,1,2,2,1,2,2) # fill in after second coding
+
+ratings <- rbind(round1, round2)
+kripp.alpha(ratings, method = "nominal")
+```
+
+
+```{r}
+print(colnames(out_mbh$meta))
+```
+
+
+```{r}
+# Export speech-level theta for Python within-speaker analysis
+theta_df <- as.data.frame(mbh_stm$theta)
+colnames(theta_df) <- paste0("T", 1:22)
+
+# Add metadata
+theta_df$speaker_norm  <- out_mbh$meta$speaker_norm
+theta_df$party         <- out_mbh$meta$party
+theta_df$in_government <- out_mbh$meta$in_government
+theta_df$date          <- out_mbh$meta$date
+
+# Updated regime scores for K=25
+theta_df$Managerial  <- theta_df$T4  + theta_df$T5  + 
+                        theta_df$T8  + theta_df$T13 + theta_df$T14 + 
+                        theta_df$T17 + theta_df$T20
+
+theta_df$Exploratory <- theta_df$T2  + theta_df$T3  + theta_df$T6  + 
+                        theta_df$T11 + theta_df$T12 + theta_df$T16 + 
+                        theta_df$T18 + theta_df$T19 + theta_df$T21 + 
+                        theta_df$T22
+
+
+write.csv(theta_df, "R_data/theta_speech_level.csv", row.names = FALSE)
+print(paste("Exported", nrow(theta_df), "speeches with theta values"))
+
+# Verify regime scores sum sensibly
+print(paste("Mean Managerial:", round(mean(theta_df$Managerial), 3)))
+print(paste("Mean Exploratory:", round(mean(theta_df$Exploratory), 3)))
+```
+
+
+
+## Change-Point Analysis
+
+
+
+```{r}
+# 1. Load data
+df_mbh_quarterly  <- read_csv("data/df_mbh_quarterly.csv")
+regime_monthly    <- read_csv("R_data/regime_gov_monthly.csv")
+
+# 2. Aggregate STM regime scores to quarterly
+regime_quarterly <- regime_monthly %>%
+  mutate(
+    month   = as.Date(month),
+    quarter = as.Date(as.yearqtr(month, format = "%Y-%m-%d"))
+  ) %>%
+  group_by(quarter, Regime, Role) %>%
+  summarise(
+    Score = mean(Score, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# 3. Pivot wide
+regime_wide <- regime_quarterly %>%
+  pivot_wider(
+    names_from  = c(Regime, Role),
+    values_from = Score
+  ) %>%
+  rename(
+    Managerial_Gov  = Managerial_Government,
+    Managerial_Opp  = Managerial_Opposition,
+    Exploratory_Gov = Exploratory_Government,
+    Exploratory_Opp = Exploratory_Opposition
+  ) %>%
+  mutate(
+    Managerial_gap  = Managerial_Gov  - Managerial_Opp,
+    Exploratory_gap = Exploratory_Gov - Exploratory_Opp
+  ) %>%
+  arrange(quarter) %>%
+  drop_na()
+
+# 4. Pivot sentiment and similarity wide
+df_mbh_quarterly <- df_mbh_quarterly %>%
+  mutate(quarter = as.Date(quarter)) %>%
+  pivot_wider(
+    names_from  = in_government,
+    values_from = c(parlasent_sentiment, survivor_similarity, speech_count)
+  ) %>%
+  rename(
+    sent_gov  = parlasent_sentiment_1,
+    sent_opp  = parlasent_sentiment_0,
+    sim_gov   = survivor_similarity_1,
+    sim_opp   = survivor_similarity_0
+  ) %>%
+  mutate(
+    sent_gap = sent_gov - sent_opp,
+    sim_gap  = sim_gov  - sim_opp
+  ) %>%
+  arrange(quarter) %>%
+  drop_na()
+
+# 5. Filter to 2014Q1-2024Q4
+regime_wide <- regime_wide %>%
+  filter(quarter >= as.Date("2014-01-01") &
+         quarter <= as.Date("2024-12-31"))
+
+df_mbh_quarterly <- df_mbh_quarterly %>%
+  filter(quarter >= as.Date("2014-01-01") &
+         quarter <= as.Date("2024-12-31"))
+
+# 6. Interpolate missing quarters
+full_quarters <- seq(as.Date("2014-01-01"), as.Date("2024-10-01"), by = "quarter")
+
+interpolate_df <- function(df, date_col, full_dates) {
+  df %>%
+    right_join(data.frame(quarter = full_dates), by = date_col) %>%
+    arrange(quarter) %>%
+    mutate(across(where(is.numeric), ~ zoo::na.approx(., rule = 2)))
+}
+
+regime_wide      <- interpolate_df(regime_wide, "quarter", full_quarters)
+df_mbh_quarterly <- interpolate_df(df_mbh_quarterly, "quarter", full_quarters)
+
+# 7. Check
+print(paste("STM quarters:", nrow(regime_wide)))
+print(paste("Sentiment quarters:", nrow(df_mbh_quarterly)))
+print(paste("Any NaN in regime:", sum(is.na(regime_wide))))
+print(paste("Any NaN in quarterly:", sum(is.na(df_mbh_quarterly))))
+
+```
+
+```{r}
+set.seed(42)
+
+# Helper function
+run_ecp <- function(series, dates, name, sig_lvl = 0.05) {
+  mat <- matrix(series, ncol = 1)
+  result <- e.divisive(mat, sig.lvl = sig_lvl, R = 499)
+  
+  cp_indices <- result$estimates
+  cp_indices <- cp_indices[cp_indices != 1 & cp_indices <= length(dates)]
+  
+  if (length(cp_indices) == 0) {
+    breaks <- "none detected"
+  } else {
+    breaks <- paste(format(dates[cp_indices], "%Y"),
+                    paste0("Q", ceiling(as.numeric(format(dates[cp_indices], "%m")) / 3)),
+                    sep = " ")
+  }
+  
+  cat(sprintf("%-35s → %s\n", name, paste(breaks, collapse = ", ")))
+  return(list(result = result, breaks = breaks, indices = cp_indices))
+}
+
+# Run ECP at three significance levels
+for (sig in c(0.05, 0.10, 0.20)) {
+  cat(sprintf("\n=== ECP CHANGE POINT RESULTS (sig.lvl = %.2f) ===\n\n", sig))
+  
+  run_ecp(regime_wide$Managerial_Gov,   regime_wide$quarter,       "Managerial (Gov)",           sig)
+  run_ecp(regime_wide$Managerial_Opp,   regime_wide$quarter,       "Managerial (Opp)",           sig)
+  run_ecp(regime_wide$Exploratory_Gov,  regime_wide$quarter,       "Exploratory (Gov)",          sig)
+  run_ecp(regime_wide$Exploratory_Opp,  regime_wide$quarter,       "Exploratory (Opp)",          sig)
+  run_ecp(regime_wide$Managerial_gap,   regime_wide$quarter,       "Managerial Gap (Gov-Opp)",   sig)
+  run_ecp(regime_wide$Exploratory_gap,  regime_wide$quarter,       "Exploratory Gap (Gov-Opp)",  sig)
+  run_ecp(df_mbh_quarterly$sim_gov,     df_mbh_quarterly$quarter,  "Survivor Similarity (Gov)",  sig)
+  run_ecp(df_mbh_quarterly$sim_opp,     df_mbh_quarterly$quarter,  "Survivor Similarity (Opp)",  sig)
+  run_ecp(df_mbh_quarterly$sim_gap,     df_mbh_quarterly$quarter,  "Survivor Similarity Gap",    sig)
+  run_ecp(df_mbh_quarterly$sent_gov,    df_mbh_quarterly$quarter,  "Sentiment (Gov)",            sig)
+  run_ecp(df_mbh_quarterly$sent_opp,    df_mbh_quarterly$quarter,  "Sentiment (Opp)",            sig)
+  run_ecp(df_mbh_quarterly$sent_gap,    df_mbh_quarterly$quarter,  "Sentiment Gap",              sig)
+}
+```
+
+#Multivariate Change-Point Analysis
+
+```{r}
+set.seed(42)
+
+# 1. Build multivariate matrices
+
+# Matrix 1: STM regime scores (all 6 series)
+regime_matrix <- regime_wide %>%
+  select(Managerial_Gov, Managerial_Opp, 
+         Exploratory_Gov, Exploratory_Opp,
+         Managerial_gap, Exploratory_gap) %>%
+  as.matrix()
+
+# Matrix 2: Similarity and sentiment (all 6 series)
+sim_sent_matrix <- df_mbh_quarterly %>%
+  select(sim_gov, sim_opp, sim_gap,
+         sent_gov, sent_opp, sent_gap) %>%
+  as.matrix()
+
+# Matrix 3: All series combined (12 series)
+all_matrix <- cbind(regime_matrix, sim_sent_matrix)
+
+# 2. Run multivariate ECP
+for (sig in c(0.05, 0.10, 0.20)) {
+  cat(sprintf("\n=== MULTIVARIATE ECP (sig.lvl = %.2f) ===\n\n", sig))
+  
+  # STM regime scores
+  result_regime <- e.divisive(regime_matrix, sig.lvl = sig, R = 499)
+  cp_regime <- result_regime$estimates
+  cp_regime <- cp_regime[cp_regime != 1 & cp_regime <= nrow(regime_wide)]
+  breaks_regime <- if (length(cp_regime) == 0) "none detected" else {
+    paste(format(regime_wide$quarter[cp_regime], "%Y"),
+          paste0("Q", ceiling(as.numeric(format(regime_wide$quarter[cp_regime], "%m")) / 3)),
+          sep = " ", collapse = ", ")
+  }
+  cat(sprintf("%-40s → %s\n", "STM Regime Scores (6 series)", breaks_regime))
+  
+  # Similarity and sentiment
+  result_sim_sent <- e.divisive(sim_sent_matrix, sig.lvl = sig, R = 499)
+  cp_sim_sent <- result_sim_sent$estimates
+  cp_sim_sent <- cp_sim_sent[cp_sim_sent != 1 & cp_sim_sent <= nrow(df_mbh_quarterly)]
+  breaks_sim_sent <- if (length(cp_sim_sent) == 0) "none detected" else {
+    paste(format(df_mbh_quarterly$quarter[cp_sim_sent], "%Y"),
+          paste0("Q", ceiling(as.numeric(format(df_mbh_quarterly$quarter[cp_sim_sent], "%m")) / 3)),
+          sep = " ", collapse = ", ")
+  }
+  cat(sprintf("%-40s → %s\n", "Similarity & Sentiment (6 series)", breaks_sim_sent))
+  
+  # All series combined
+  result_all <- e.divisive(all_matrix, sig.lvl = sig, R = 499)
+  cp_all <- result_all$estimates
+  cp_all <- cp_all[cp_all != 1 & cp_all <= nrow(regime_wide)]
+  breaks_all <- if (length(cp_all) == 0) "none detected" else {
+    paste(format(regime_wide$quarter[cp_all], "%Y"),
+          paste0("Q", ceiling(as.numeric(format(regime_wide$quarter[cp_all], "%m")) / 3)),
+          sep = " ", collapse = ", ")
+  }
+  cat(sprintf("%-40s → %s\n", "All Series Combined (12 series)", breaks_all))
+}
+
+
+
+
+```
+# Figure for Multi Change-Point
+```{r}
+# 1. Combine all series into long format
+# STM regime scores
+regime_long <- regime_wide %>%
+  select(quarter, Managerial_Gov, Managerial_Opp,
+         Exploratory_Gov, Exploratory_Opp) %>%
+  pivot_longer(-quarter, names_to = "series", values_to = "value") %>%
+  mutate(
+    group = case_when(
+      grepl("Gov", series) ~ "Government",
+      TRUE ~ "Opposition"
+    ),
+    measure = case_when(
+      grepl("Managerial", series) ~ "Managerial Score",
+      TRUE ~ "Exploratory Score"
+    )
+  )
+
+
+sim_quarterly <- df_mbh_quarterly %>%
+  select(quarter, sim_opp, sim_gov, sim_gap) %>%
+  arrange(quarter)
+
+sent_quarterly <- df_mbh_quarterly %>%
+  select(quarter, sent_opp, sent_gov, sent_gap) %>%
+  arrange(quarter)
+
+sim_quarterly$quarter  <- as.Date(sim_quarterly$quarter)
+sent_quarterly$quarter <- as.Date(sent_quarterly$quarter)
+regime_wide$quarter    <- as.Date(regime_wide$quarter)
+
+# Similarity scores
+sim_long <- sim_quarterly %>%
+  select(quarter, sim_gov, sim_opp) %>%
+  pivot_longer(-quarter, names_to = "series", values_to = "value") %>%
+  mutate(
+    group = case_when(series == "sim_gov" ~ "Government", TRUE ~ "Opposition"),
+    measure = "Survivor Similarity",
+    value = value * 100  # scale to match existing plot
+  )
+
+# Sentiment scores
+sent_long <- sent_quarterly %>%
+  select(quarter, sent_gov, sent_opp) %>%
+  pivot_longer(-quarter, names_to = "series", values_to = "value") %>%
+  mutate(
+    group = case_when(series == "sent_gov" ~ "Government", TRUE ~ "Opposition"),
+    measure = "ParlaSent Sentiment"
+  )
+
+# Combine
+all_long <- bind_rows(regime_long, sim_long, sent_long) %>%
+  mutate(
+    measure = factor(measure, levels = c(
+      "Managerial Score", "Exploratory Score",
+      "Survivor Similarity", "ParlaSent Sentiment"
+    )),
+    group = factor(group, levels = c("Government", "Opposition"))
+  )
+
+```
+
+
+```{r}
+# 2. Plot
+p <- ggplot(all_long, aes(x = quarter, y = value,
+                           colour = group, group = group)) +
+  # Raw quarterly points (faint)
+  geom_point(alpha = 0.2, size = 0.8) +
+  # Raw line (faint)
+  geom_line(alpha = 0.2, linewidth = 0.4) +
+  # LOWESS smoothed line
+  geom_smooth(method = "loess", span = 0.4, se = FALSE,
+              linewidth = 1.2) +
+  # Commission Report vertical line
+  geom_vline(xintercept = as.numeric(as.Date("2021-01-12")),
+             linetype = "dashed", colour = "grey40",
+             linewidth = 0.7) +
+  annotate("text",
+           x = as.Date("2021-01-12"),
+           y = Inf, label = "Commission Report",
+           hjust = -0.05, vjust = 1.5,
+           size = 2.8, colour = "grey40") +
+  # Facet by measure
+  facet_wrap(~ measure, scales = "free_y", ncol = 2) +
+  # Colours matching existing plots
+  scale_colour_manual(
+    values = c("Government" = "#2166AC", "Opposition" = "#D6604D"),
+    name = "Role"
+  ) +
+  scale_x_date(date_breaks = "2 years", date_labels = "%Y") +
+  labs(
+    title = "Quarterly Discourse Measures: Government vs Opposition (2014-2024)",
+    x = NULL,
+    y = "Score",
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    legend.position = "bottom",
+    strip.text = element_text(face = "bold", size = 10),
+    panel.grid.minor = element_blank(),
+    axis.text.x = element_text(angle = 30, hjust = 1)
+  )
+
+ggsave("R_figures/quarterly_discourse_trajectories.png",
+       p, width = 12, height = 8, dpi = 300)
+ggsave("R_figures/quarterly_discourse_trajectories.pdf",
+       p, width = 12, height = 8)
+
+print(p)
+
+```
+
+
+
+# Multivariate Mixed Effects Model (Phase 3)
+```{r}
+# 1. Load data
+all_combined <- read_csv("data/all_switchers_combined.csv")
+
+print(paste("Speeches:", nrow(all_combined)))
+print(paste("Speakers:", n_distinct(all_combined$speaker_norm)))
+print(table(all_combined$in_government))
+
+# 2. Standardise outcomes
+# Essential so all four outcomes are on comparable scales
+all_combined <- all_combined %>%
+  mutate(
+    Managerial_z           = scale(Managerial),
+    Exploratory_z          = scale(Exploratory),
+    parlasent_sentiment_z  = scale(parlasent_sentiment_sent),
+    survivor_similarity_z  = scale(survivor_similarity_sent),
+    in_government          = as.factor(in_government)
+  )
+
+# 3. Reshape to long format
+all_long <- all_combined %>%
+  pivot_longer(
+    cols      = c(Managerial_z, Exploratory_z, 
+                  parlasent_sentiment_z, survivor_similarity_z),
+    names_to  = "outcome",
+    values_to = "value"
+  ) %>%
+  mutate(
+    outcome = recode(outcome,
+      "Managerial_z"          = "Managerial",
+      "Exploratory_z"         = "Exploratory",
+      "parlasent_sentiment_z" = "Sentiment",
+      "survivor_similarity_z" = "Similarity"
+    ),
+    outcome = as.factor(outcome),
+    outcome = relevel(outcome, ref = "Managerial")  # Managerial as reference
+  )
+
+print(paste("Long format rows:", nrow(all_long)))
+
+# 4. Multivariate mixed model
+# in_government * outcome tests whether effect of government status
+# differs across the four outcomes
+# (1 | speaker_norm) = random intercept per speaker
+# (1 | speaker_norm:outcome) = random intercept per speaker-outcome combination
+
+m_multi <- lmer(
+  value ~ in_government * outcome + 
+    (1 | speaker_norm) + 
+    (1 | speaker_norm:outcome),
+  data = all_long,
+  REML = TRUE
+)
+
+summary(m_multi)
+```
+
+```{r}
+# 5. Extract and present results
+tidy_results <- tidy(m_multi, effects = "fixed", conf.int = TRUE) %>%
+  filter(grepl("in_government", term)) %>%
+  mutate(
+    sig = case_when(
+      p.value < 0.001 ~ "***",
+      p.value < 0.01  ~ "**",
+      p.value < 0.05  ~ "*",
+      TRUE            ~ ""
+    ),
+    across(where(is.numeric), ~ round(.x, 4))
+  ) %>%
+  select(term, estimate, std.error, conf.low, conf.high, p.value, sig)
+
+print(tidy_results)
+```
+
+
+
+
+
