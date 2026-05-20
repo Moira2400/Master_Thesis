@@ -6,21 +6,7 @@ in this thesis. Data collection scripts are provided for transparency but do
 not need to be re-run — all pre-collected data is provided.
 
 ## Folder Structure
-Thesis-Final/
-├── data/
-├── R_data/
-├── figures/
-├── R_Tables/
-├── Interviews/
-├── 1_data_collection.ipynb
-├── 2_member_collection.ipynb
-├── 3_merge_speeches.ipynb
-├── 4_data_cleaning.ipynb
-├── 5_baseline_collection.ipynb
-├── Phase1_final.ipynb
-├── Phase2_3_final.ipynb
-└── STM_others_final.Rmd
-
+'''text
 Thesis-Final/
 ├── data/                          # All input and output CSV files
 ├── R_data/                        # RDS model objects and R-generated CSVs
@@ -35,7 +21,7 @@ Thesis-Final/
 ├── Phase1_final.ipynb             # Phase1 analysis (keyness - log likelihood, ParlaSent)
 ├── Phase2_3_final.ipynb           # Phase2 & 3 analysis: survivor similarity, role switchers OLS, Granger Causality
 └── STM_others_final.Rmd           # Structural Topic Model (R), Krippendorf, Change-point analysis, Multivariate Mixed-effects model
-
+'''
 ## How to Reproduce
 
 ### Requirements
