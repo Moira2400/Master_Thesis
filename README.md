@@ -6,7 +6,7 @@ in this thesis. Data collection scripts are provided for transparency but do
 not need to be re-run — all pre-collected data is provided.
 
 ## Folder Structure
-'''text
+```text
 Thesis-Final/
 ├── data/                          # All input and output CSV files
 ├── R_data/                        # RDS model objects and R-generated CSVs
@@ -21,7 +21,8 @@ Thesis-Final/
 ├── Phase1_final.ipynb             # Phase1 analysis (keyness - log likelihood, ParlaSent)
 ├── Phase2_3_final.ipynb           # Phase2 & 3 analysis: survivor similarity, role switchers OLS, Granger Causality
 └── STM_others_final.Rmd           # Structural Topic Model (R), Krippendorf, Change-point analysis, Multivariate Mixed-effects model
-'''
+```
+
 ## How to Reproduce
 
 ### Requirements
